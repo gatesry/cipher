@@ -1,0 +1,123 @@
+# .github/workflows/docker-publish.yml
+name: Build & Publish Docker Images
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+    inputs:
+      build_ui:
+        description: "Build & push the UI image"
+        type: boolean
+        required: false
+        default: true
+      push_images:
+        description: "Actually push to registry (false = dry-run build only)"
+        type: boolean
+        required: false
+        default: true
+      server_platforms:
+        description: "Platforms for server image"
+        type: choice
+        required: false
+        options:
+          - linux/amd64,linux/arm64
+          - linux/amd64
+          - linux/arm64
+        default: linux/amd64,linux/arm64
+      ui_platforms:
+        description: "Platforms for UI image"
+        type: choice
+        required: false
+        options:
+          - linux/amd64
+          - linux/amd64,linux/arm64
+        default: linux/amd64
+      ui_tag:
+        description: "UI tag (e.g., 'ui' or 'ui-<custom>')"
+        type: string
+        required: false
+        default: ui
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ github.event_name == 'push' || inputs.push_images == true }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # -------- Server (no UI) --------
+      - name: Meta (server)
+        id: meta_server
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=tag
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.title=Cipher (server)
+            org.opencontainers.image.description=Cipher MCP/api image (no UI)
+
+      - name: Build & push (server)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          # UI is excluded by default; no build-arg needed for the server image
+          platforms: ${{ github.event_name == 'workflow_dispatch' && inputs.server_platforms || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name == 'push' || inputs.push_images == true }}
+          tags: ${{ steps.meta_server.outputs.tags }}
+          labels: ${{ steps.meta_server.outputs.labels }}
+
+      # -------- UI image --------
+      - name: Meta (ui)
+        id: meta_ui
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_ui == true }}
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ github.event_name == 'workflow_dispatch' && inputs.ui_tag || 'ui' }}
+            type=raw,value=${{ (github.event_name == 'workflow_dispatch' && format('{0}-{1}', inputs.ui_tag, github.sha)) || format('ui-{0}', github.sha) }}
+            type=ref,event=tag,prefix=${{ github.event_name == 'workflow_dispatch' && format('{0}-', inputs.ui_tag) || 'ui-' }}
+          labels: |
+            org.opencontainers.image.title=Cipher (ui)
+            org.opencontainers.image.description=Cipher with Web UI
+
+      - name: Build & push (ui)
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_ui == true }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: |
+            BUILD_UI=true
+          platforms: ${{ github.event_name == 'workflow_dispatch' && inputs.ui_platforms || 'linux/amd64' }}
+          push: ${{ github.event_name == 'push' || inputs.push_images == true }}
+          tags: ${{ steps.meta_ui.outputs.tags }}
+          labels: ${{ steps.meta_ui.outputs.labels }}
